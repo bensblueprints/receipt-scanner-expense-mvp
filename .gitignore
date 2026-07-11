@@ -1,0 +1,22 @@
+# dependencies & native vendoring
+node_modules/
+vendor/
+
+# build output
+dist/
+release/
+
+# OCR language data — downloaded once by scripts/fetch-ocr-data.js (postinstall),
+# never committed (binary, ~11MB)
+ocr-assets/*.traineddata
+ocr-assets/*.traineddata.gz
+
+# env & local config
+.env
+.env.*
+
+# test artifacts & temp
+test/out/
+*.log
+Thumbs.db
+.DS_Store
