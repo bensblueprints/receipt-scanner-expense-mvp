@@ -40,7 +40,7 @@ npm test
 
 Don't want to touch a terminal? Grab the packaged Windows installer (pay once, own it forever):
 
-**→ [https://whop.com/onetime-suite](https://whop.com/onetime-suite)**
+**→ [https://whop.com/benjisaiempire/snapreceipt](https://whop.com/benjisaiempire/snapreceipt)**
 
 ## 🛠 Tech stack
 
