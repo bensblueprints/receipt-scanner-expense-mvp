@@ -1,5 +1,9 @@
 # 🧾 Snapreceipt
 
+## Demo
+
+VIDEO-PLACEHOLDER
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 **Scan receipts, log expenses, export tax-ready reports — 100% on your machine. Pay once, own it forever.**
