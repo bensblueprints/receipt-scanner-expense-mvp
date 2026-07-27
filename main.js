@@ -14,6 +14,7 @@ const parse = require('./src/parse');
 const ocr = require('./src/ocr');
 const { receiptsCsv, mileageCsv } = require('./src/csv');
 const { buildExpenseReportPdf } = require('./src/pdf-report');
+const { gateLicense, registerLicenseIpc } = require('./license-gate');
 
 let db;
 let win;
@@ -216,7 +217,9 @@ function createWindow() {
   win.loadFile(path.join(__dirname, 'dist', 'index.html'));
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  if (!(await gateLicense())) return; // quit already requested
+  registerLicenseIpc();
   db = openDb(app.getPath('userData'));
   registerIpc();
   createWindow();

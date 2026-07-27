@@ -39,6 +39,9 @@
     "files": [
       "main.js",
       "preload.js",
+      "license-gate.js",
+      "whop-license.js",
+      "whop-license.config.json",
       "src/**",
       "dist/**",
       "vendor/**",
