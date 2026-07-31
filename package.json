@@ -1,6 +1,6 @@
 {
   "name": "snapreceipt",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Local receipt scanner + expense logger. OCR runs 100% on your machine, prefills a review form — you decide what gets saved. Pay once, own it forever.",
   "author": "Ben (bensblueprints)",
   "license": "MIT",
@@ -11,7 +11,7 @@
     "start": "electron .",
     "postinstall": "node scripts/setup-native.js && node scripts/fetch-ocr-data.js",
     "test": "node test/smoke.js",
-    "dist": "electron-builder --win nsis"
+    "dist": "npm run build && electron-builder --win nsis"
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",
@@ -39,9 +39,6 @@
     "files": [
       "main.js",
       "preload.js",
-      "license-gate.js",
-      "whop-license.js",
-      "whop-license.config.json",
       "src/**",
       "dist/**",
       "vendor/**",
