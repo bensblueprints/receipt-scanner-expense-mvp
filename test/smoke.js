@@ -43,7 +43,12 @@ function ok(name) {
     // ===== 1. real local OCR -> parser prefill; no auto-save =====
     assert(ocr.ocrAvailable(), 'eng.traineddata.gz present in ocr-assets (postinstall fetch)');
     const fixture = path.join(tmp, 'synthetic-receipt.png');
-    await generateReceiptPng(fixture, ['COFFEE HOUSE', '07/01/2026', 'TAX $1.45', 'TOTAL $23.45']);
+    await generateReceiptPng(fixture, [
+      'COFFEE HOUSE', '07/01/2026',
+      'LATTE $5.00', 'BAGEL $3.50',
+      'SUBTOTAL $22.00', 'TAX $1.45', 'TOTAL $23.45',
+      'CHASE VISA ****1234'
+    ]);
     const rawText = await ocr.recognize(fixture);
     assert(rawText.trim().length > 0, 'OCR produced text');
     console.log('    OCR text:', JSON.stringify(rawText.trim()));
@@ -52,20 +57,30 @@ function ok(name) {
     assert(/COFFEE/i.test(fields.vendor), `vendor contains COFFEE (got ${JSON.stringify(fields.vendor)})`);
     assert.strictEqual(fields.total_cents, 2345, `total_cents exactly 2345 (got ${fields.total_cents})`);
     assert.strictEqual(fields.tax_cents, 145, `tax_cents exactly 145 (got ${fields.tax_cents})`);
+    assert.strictEqual(fields.subtotal_cents, 2200, `subtotal_cents exactly 2200 (got ${fields.subtotal_cents})`);
     assert.strictEqual(fields.date, '2026-07-01', `date 2026-07-01 (got ${fields.date})`);
+    assert(/chase/i.test(fields.bank_name || ''), `bank_name contains CHASE (got ${JSON.stringify(fields.bank_name)})`);
+    const latte = fields.items.find((it) => /LATTE/i.test(it.description));
+    const bagel = fields.items.find((it) => /BAGEL/i.test(it.description));
+    assert(latte && latte.amount_cents === 500, `LATTE item at 500 cents (got ${JSON.stringify(fields.items)})`);
+    assert(bagel && bagel.amount_cents === 350, `BAGEL item at 350 cents`);
+    assert(!fields.items.some((it) => /TAX|TOTAL|VISA/i.test(it.description)), 'totals/payment lines are NOT items');
     assert(Number.isInteger(fields.total_cents), 'total is integer cents');
 
     // THE core product guarantee: OCR + parse happened, DB untouched.
     assert.strictEqual(db.countReceipts(), 0, 'NO receipt row exists after OCR+parse (prefill only, nothing auto-saves)');
-    ok('real tesseract.js OCR (local assets) -> parser: vendor/total/tax/date exact; zero DB rows before explicit save');
+    ok('real tesseract.js OCR (local assets) -> parser: vendor/date/total/tax/subtotal/bank exact + line items; zero DB rows before explicit save');
 
-    // ===== 2. explicit save inserts, integer cents =====
+    // ===== 2. explicit save inserts, integer cents, line items persisted =====
     const saved = db.saveReceipt({
       image_path: fixture,
       vendor: fields.vendor,
       date: fields.date,
       total_cents: fields.total_cents,
       tax_cents: fields.tax_cents,
+      subtotal_cents: fields.subtotal_cents,
+      bank_name: fields.bank_name,
+      items: fields.items,
       category: 'Meals',
       project_tag: 'client-a',
       ocr_raw_text: rawText
@@ -73,9 +88,14 @@ function ok(name) {
     assert.strictEqual(db.countReceipts(), 1, 'exactly one row after explicit save');
     assert.strictEqual(saved.total_cents, 2345);
     assert.strictEqual(saved.tax_cents, 145);
+    assert.strictEqual(saved.subtotal_cents, 2200);
+    assert(/chase/i.test(saved.bank_name), 'bank_name stored');
+    const savedItems = db.getItems(saved.id);
+    assert.strictEqual(savedItems.length, fields.items.length, 'all parsed line items persisted');
+    assert.strictEqual(savedItems[0].amount_cents, fields.items[0].amount_cents, 'item amounts in cents');
     assert(Number.isInteger(saved.total_cents) && Number.isInteger(saved.tax_cents), 'stored money is integer cents');
     assert.throws(() => db.saveReceipt({ vendor: 'x', total_cents: 12.34 }), /integer cents/, 'float cents rejected');
-    ok('explicit save inserts row with integer cents; non-integer cents rejected');
+    ok('explicit save inserts row with integer cents, bank, subtotal and line items; non-integer cents rejected');
 
     // ===== 3. report math =====
     db.saveReceipt({ vendor: 'Cafe B', date: '2026-07-02', total_cents: 550, category: 'Meals' });
@@ -102,7 +122,7 @@ function ok(name) {
     db.saveReceipt({ vendor: 'Vendor, "Fancy"', date: '2026-07-04', total_cents: 999, category: 'Other' });
     const csv = receiptsCsv(db.listReceipts({ month: '2026-07' }));
     const lines = csv.trim().split('\r\n');
-    assert.strictEqual(lines[0], 'date,vendor,category,project_tag,total,tax', 'CSV header');
+    assert.strictEqual(lines[0], 'date,vendor,category,project_tag,total,tax,subtotal,bank_name', 'CSV header');
     assert.strictEqual(lines.length - 1, 4, 'CSV row count matches July receipts');
     assert(csv.includes('23.45'), 'CSV contains OCR-derived total as decimal');
     assert(csv.includes('"Vendor, ""Fancy"""'), 'comma+quote vendor RFC4180-escaped');
@@ -140,7 +160,13 @@ function ok(name) {
     // is an OS condition, not a Snapreceipt bug — skip loudly, still gate on
     // all core logic above.
     const probe = spawnSync(electron, ['--version'], { encoding: 'utf8', timeout: 60000 });
-    if (probe.status !== 0 && /register the window class/i.test((probe.stderr || '') + (probe.stdout || ''))) {
+    if (probe.error) {
+      // Node's child_process spawn itself is failing at OS level on this
+      // machine (observed: ENOENT spawning ANY exe, incl. cmd.exe, while the
+      // same binaries run fine from a shell). Environment issue, not an app
+      // bug — skip loudly.
+      console.warn(`  ⚠ SKIPPED: OS refused Node child_process spawn (${probe.error.message}).`);
+    } else if (probe.status !== 0 && /register the window class/i.test((probe.stderr || '') + (probe.stdout || ''))) {
       console.warn('  ⚠ SKIPPED: Electron cannot launch on this machine right now (window-class/atom');
       console.warn('    exhaustion — close leaked processes or reboot, then re-run `npm test`).');
     } else {

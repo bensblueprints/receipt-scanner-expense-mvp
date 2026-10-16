@@ -40,6 +40,13 @@ function openDb(dataDir) {
       ocr_raw_text TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS receipt_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      receipt_id INTEGER NOT NULL REFERENCES receipts(id) ON DELETE CASCADE,
+      description TEXT NOT NULL DEFAULT '',
+      amount_cents INTEGER NOT NULL DEFAULT 0,
+      position INTEGER NOT NULL DEFAULT 0
+    );
     CREATE TABLE IF NOT EXISTS mileage_entries (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       date TEXT NOT NULL,
@@ -57,7 +64,18 @@ function openDb(dataDir) {
     );
     CREATE INDEX IF NOT EXISTS idx_receipts_date ON receipts(date);
     CREATE INDEX IF NOT EXISTS idx_receipts_category ON receipts(category);
+    CREATE INDEX IF NOT EXISTS idx_receipt_items_receipt ON receipt_items(receipt_id);
   `);
+
+  // Idempotent column migrations for DBs created by older versions.
+  const receiptCols = db.prepare('PRAGMA table_info(receipts)').all().map((c) => c.name);
+  if (!receiptCols.includes('subtotal_cents')) {
+    db.exec('ALTER TABLE receipts ADD COLUMN subtotal_cents INTEGER');
+  }
+  if (!receiptCols.includes('bank_name')) {
+    db.exec("ALTER TABLE receipts ADD COLUMN bank_name TEXT NOT NULL DEFAULT ''");
+  }
+  db.pragma('foreign_keys = ON');
 
   const seedCat = db.prepare('INSERT OR IGNORE INTO categories(name) VALUES (?)');
   for (const c of DEFAULT_CATEGORIES) seedCat.run(c);
@@ -78,6 +96,21 @@ function mileageAmountCents(miles, rateCentsPerMile) {
 }
 
 function wrap(db) {
+  const insertItem = db.prepare(
+    'INSERT INTO receipt_items (receipt_id, description, amount_cents, position) VALUES (?, ?, ?, ?)'
+  );
+  function replaceItems(receiptId, items) {
+    db.prepare('DELETE FROM receipt_items WHERE receipt_id = ?').run(receiptId);
+    if (!Array.isArray(items)) return;
+    let pos = 0;
+    for (const it of items) {
+      const description = String(it && it.description || '').trim();
+      const amount = asInt(it && it.amount_cents, 'item amount_cents');
+      if (!description && amount == null) continue;
+      insertItem.run(receiptId, description, amount == null ? 0 : amount, pos++);
+    }
+  }
+
   return {
     raw: db,
 
@@ -85,22 +118,29 @@ function wrap(db) {
     saveReceipt(r) {
       const total = asInt(r.total_cents, 'total_cents');
       const tax = asInt(r.tax_cents, 'tax_cents');
-      const info = db
-        .prepare(
-          `INSERT INTO receipts (image_path, vendor, date, total_cents, tax_cents, category, project_tag, ocr_raw_text)
-           VALUES (@image_path, @vendor, @date, @total_cents, @tax_cents, @category, @project_tag, @ocr_raw_text)`
-        )
-        .run({
-          image_path: r.image_path || null,
-          vendor: r.vendor || '',
-          date: r.date || null,
-          total_cents: total == null ? 0 : total,
-          tax_cents: tax,
-          category: r.category || 'Other',
-          project_tag: r.project_tag || '',
-          ocr_raw_text: r.ocr_raw_text || ''
-        });
-      return this.getReceipt(info.lastInsertRowid);
+      const subtotal = asInt(r.subtotal_cents, 'subtotal_cents');
+      const tx = db.transaction(() => {
+        const info = db
+          .prepare(
+            `INSERT INTO receipts (image_path, vendor, date, total_cents, tax_cents, subtotal_cents, bank_name, category, project_tag, ocr_raw_text)
+             VALUES (@image_path, @vendor, @date, @total_cents, @tax_cents, @subtotal_cents, @bank_name, @category, @project_tag, @ocr_raw_text)`
+          )
+          .run({
+            image_path: r.image_path || null,
+            vendor: r.vendor || '',
+            date: r.date || null,
+            total_cents: total == null ? 0 : total,
+            tax_cents: tax,
+            subtotal_cents: subtotal,
+            bank_name: r.bank_name || '',
+            category: r.category || 'Other',
+            project_tag: r.project_tag || '',
+            ocr_raw_text: r.ocr_raw_text || ''
+          });
+        replaceItems(info.lastInsertRowid, r.items);
+        return info.lastInsertRowid;
+      });
+      return this.getReceipt(tx());
     },
     getReceipt(id) {
       return db.prepare('SELECT * FROM receipts WHERE id = ?').get(id);
@@ -120,21 +160,30 @@ function wrap(db) {
       const cur = this.getReceipt(id);
       if (!cur) return null;
       const next = { ...cur, ...patch };
-      db.prepare(
-        `UPDATE receipts SET image_path=@image_path, vendor=@vendor, date=@date, total_cents=@total_cents,
-         tax_cents=@tax_cents, category=@category, project_tag=@project_tag, ocr_raw_text=@ocr_raw_text WHERE id=@id`
-      ).run({
-        id,
-        image_path: next.image_path || null,
-        vendor: next.vendor || '',
-        date: next.date || null,
-        total_cents: asInt(next.total_cents, 'total_cents') ?? 0,
-        tax_cents: asInt(next.tax_cents, 'tax_cents'),
-        category: next.category || 'Other',
-        project_tag: next.project_tag || '',
-        ocr_raw_text: next.ocr_raw_text || ''
+      const tx = db.transaction(() => {
+        db.prepare(
+          `UPDATE receipts SET image_path=@image_path, vendor=@vendor, date=@date, total_cents=@total_cents,
+           tax_cents=@tax_cents, subtotal_cents=@subtotal_cents, bank_name=@bank_name, category=@category, project_tag=@project_tag, ocr_raw_text=@ocr_raw_text WHERE id=@id`
+        ).run({
+          id,
+          image_path: next.image_path || null,
+          vendor: next.vendor || '',
+          date: next.date || null,
+          total_cents: asInt(next.total_cents, 'total_cents') ?? 0,
+          tax_cents: asInt(next.tax_cents, 'tax_cents'),
+          subtotal_cents: asInt(next.subtotal_cents, 'subtotal_cents'),
+          bank_name: next.bank_name || '',
+          category: next.category || 'Other',
+          project_tag: next.project_tag || '',
+          ocr_raw_text: next.ocr_raw_text || ''
+        });
+        if (Object.prototype.hasOwnProperty.call(patch, 'items')) replaceItems(id, patch.items);
       });
+      tx();
       return this.getReceipt(id);
+    },
+    getItems(receiptId) {
+      return db.prepare('SELECT id, description, amount_cents, position FROM receipt_items WHERE receipt_id = ? ORDER BY position, id').all(receiptId);
     },
     deleteReceipt(id) {
       return db.prepare('DELETE FROM receipts WHERE id = ?').run(id).changes > 0;

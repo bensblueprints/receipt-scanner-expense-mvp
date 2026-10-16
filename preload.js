@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('snap', {
   // explicit save — the ONLY call that creates a receipt row
   saveReceipt: (data) => ipcRenderer.invoke('receipts:save', data),
   listReceipts: (filters) => ipcRenderer.invoke('receipts:list', filters),
+  getReceiptItems: (id) => ipcRenderer.invoke('receipts:get-items', id),
   updateReceipt: (id, patch) => ipcRenderer.invoke('receipts:update', { id, patch }),
   deleteReceipt: (id) => ipcRenderer.invoke('receipts:delete', id),
   imageDataUrl: (imagePath) => ipcRenderer.invoke('receipts:image-data-url', imagePath),

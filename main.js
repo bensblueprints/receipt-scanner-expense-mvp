@@ -106,6 +106,7 @@ function registerIpc() {
   // ---- receipts CRUD (save = the ONLY way a row is created) ----
   ipcMain.handle('receipts:save', (_e, data) => db.saveReceipt(data));
   ipcMain.handle('receipts:list', (_e, filters) => db.listReceipts(filters || {}));
+  ipcMain.handle('receipts:get-items', (_e, id) => db.getItems(id));
   ipcMain.handle('receipts:update', (_e, { id, patch }) => db.updateReceipt(id, patch));
   ipcMain.handle('receipts:delete', (_e, id) => {
     const row = db.getReceipt(id);

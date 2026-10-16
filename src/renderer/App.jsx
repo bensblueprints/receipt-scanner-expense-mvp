@@ -16,6 +16,13 @@ const centsFromInput = (v) => {
   return Number.isFinite(n) ? Math.round(n * 100) : null;
 };
 const dollarsFromCents = (c) => (c == null ? '' : (c / 100).toFixed(2));
+// Subtotal shown on lists/reports: stored value wins; otherwise total - tax.
+const effectiveSubtotalCents = (r) =>
+  r.subtotal_cents != null
+    ? r.subtotal_cents
+    : r.total_cents != null && r.tax_cents != null
+      ? r.total_cents - r.tax_cents
+      : null;
 
 /* ---------- small primitives ---------- */
 function Field({ label, children }) {
@@ -50,7 +57,18 @@ function ReviewForm({ draft, categories, onSaved, onCancel }) {
   const [date, setDate] = useState(draft.fields?.date ?? draft.date ?? '');
   const [total, setTotal] = useState(dollarsFromCents(draft.fields?.total_cents ?? draft.total_cents));
   const [tax, setTax] = useState(dollarsFromCents(draft.fields?.tax_cents ?? draft.tax_cents));
+  const [subtotal, setSubtotal] = useState(() =>
+    dollarsFromCents(draft.fields?.subtotal_cents ?? effectiveSubtotalCents({
+      subtotal_cents: draft.subtotal_cents,
+      total_cents: draft.fields?.total_cents ?? draft.total_cents,
+      tax_cents: draft.fields?.tax_cents ?? draft.tax_cents
+    }))
+  );
+  const [items, setItems] = useState(() =>
+    (draft.fields?.items || []).map((it) => ({ description: it.description, amount: dollarsFromCents(it.amount_cents) }))
+  );
   const [category, setCategory] = useState(draft.category ?? 'Other');
+  const [bank, setBank] = useState(draft.fields?.bank_name ?? draft.bank_name ?? '');
   const [projectTag, setProjectTag] = useState(draft.project_tag ?? '');
   const [imgUrl, setImgUrl] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -58,6 +76,19 @@ function ReviewForm({ draft, categories, onSaved, onCancel }) {
   useEffect(() => {
     if (draft.image_path) window.snap.imageDataUrl(draft.image_path).then(setImgUrl);
   }, [draft.image_path]);
+
+  // editing an existing receipt -> load its saved line items
+  useEffect(() => {
+    if (isEdit) {
+      window.snap.getReceiptItems(draft.id).then((rows) =>
+        setItems(rows.map((r) => ({ description: r.description, amount: dollarsFromCents(r.amount_cents) })))
+      );
+    }
+  }, [draft.id]); // eslint-disable-line
+
+  const updateItem = (i, key, val) =>
+    setItems((arr) => arr.map((it, j) => (j === i ? { ...it, [key]: val } : it)));
+  const itemsSumCents = items.reduce((s, it) => s + (centsFromInput(it.amount) ?? 0), 0);
 
   const save = async () => {
     setSaving(true);
@@ -67,7 +98,12 @@ function ReviewForm({ draft, categories, onSaved, onCancel }) {
       date: date || null,
       total_cents: centsFromInput(total) ?? 0,
       tax_cents: centsFromInput(tax),
+      subtotal_cents: centsFromInput(subtotal),
+      items: items
+        .filter((it) => it.description.trim() || it.amount !== '')
+        .map((it) => ({ description: it.description.trim(), amount_cents: centsFromInput(it.amount) })),
       category,
+      bank_name: bank,
       project_tag: projectTag,
       ocr_raw_text: draft.ocr_raw_text ?? ''
     };
@@ -126,7 +162,26 @@ function ReviewForm({ draft, categories, onSaved, onCancel }) {
             </Field>
             <Field label="Total ($)"><input className={inputCls} value={total} onChange={(e) => setTotal(e.target.value)} placeholder="23.45" /></Field>
             <Field label="Tax ($)"><input className={inputCls} value={tax} onChange={(e) => setTax(e.target.value)} placeholder="1.45" /></Field>
+            <Field label="Subtotal ($)"><input className={inputCls} value={subtotal} onChange={(e) => setSubtotal(e.target.value)} placeholder="22.00" /></Field>
+            <Field label="Bank / processor"><input className={inputCls} value={bank} onChange={(e) => setBank(e.target.value)} placeholder="AMERICAN EXPRESS" /></Field>
           </div>
+          <Field label={items.length ? `Line items · sum ${fmt(itemsSumCents)}` : 'Line items'}>
+            <div className="space-y-1.5">
+              {items.map((it, i) => (
+                <div key={i} className="flex gap-2">
+                  <input className={inputCls} value={it.description} placeholder="Item description"
+                    onChange={(e) => updateItem(i, 'description', e.target.value)} />
+                  <input className={`${inputCls} !w-24 text-right`} value={it.amount} placeholder="0.00"
+                    onChange={(e) => updateItem(i, 'amount', e.target.value)} />
+                  <button className="shrink-0 rounded-lg p-2 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+                    onClick={() => setItems((arr) => arr.filter((_, j) => j !== i))}><X size={14} /></button>
+                </div>
+              ))}
+              <Button onClick={() => setItems((arr) => [...arr, { description: '', amount: '' }])} className="!px-2 !py-1 text-xs">
+                <Plus size={13} /> Add item
+              </Button>
+            </div>
+          </Field>
           <Field label="Project / client tag">
             <input className={inputCls} value={projectTag} onChange={(e) => setProjectTag(e.target.value)} placeholder="acme-rebrand" />
           </Field>
@@ -200,6 +255,9 @@ function ReceiptsView({ categories, refreshKey, bump }) {
   useEffect(() => { if (!draft && inbox.length) openNext(); }, [inbox, draft]); // eslint-disable-line
 
   const tags = useMemo(() => [...new Set(receipts.map((r) => r.project_tag).filter(Boolean))], [receipts]);
+  const sumTotal = receipts.reduce((s, r) => s + (r.total_cents ?? 0), 0);
+  const sumTax = receipts.reduce((s, r) => s + (r.tax_cents ?? 0), 0);
+  const sumSubtotal = receipts.reduce((s, r) => s + (effectiveSubtotalCents(r) ?? 0), 0);
 
   return (
     <div className="space-y-5">
@@ -239,7 +297,9 @@ function ReceiptsView({ categories, refreshKey, bump }) {
           {tags.map((t) => <option key={t}>{t}</option>)}
         </select>
         <div className="flex-1" />
-        <span className="text-sm text-zinc-500">{receipts.length} receipts · {fmt(receipts.reduce((s, r) => s + r.total_cents, 0))}</span>
+        <span className="text-sm text-zinc-500">
+          {receipts.length} receipts · Subtotal <span className="text-zinc-300">{fmt(sumSubtotal)}</span> · Tax <span className="text-zinc-300">{fmt(sumTax)}</span> · Total <span className="font-semibold text-emerald-400">{fmt(sumTotal)}</span>
+        </span>
       </div>
 
       <div className="overflow-hidden rounded-xl border border-zinc-800">
@@ -248,7 +308,7 @@ function ReceiptsView({ categories, refreshKey, bump }) {
             <tr>
               <th className="px-4 py-2.5">Date</th><th className="px-4 py-2.5">Vendor</th>
               <th className="px-4 py-2.5">Category</th><th className="px-4 py-2.5">Project</th>
-              <th className="px-4 py-2.5 text-right">Tax</th><th className="px-4 py-2.5 text-right">Total</th>
+              <th className="px-4 py-2.5 text-right">Subtotal</th><th className="px-4 py-2.5 text-right">Tax</th><th className="px-4 py-2.5 text-right">Total</th>
               <th className="px-4 py-2.5 w-20"></th>
             </tr>
           </thead>
@@ -259,6 +319,7 @@ function ReceiptsView({ categories, refreshKey, bump }) {
                 <td className="px-4 py-2.5 font-medium">{r.vendor || 'Unknown'}</td>
                 <td className="px-4 py-2.5"><span className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-300">{r.category}</span></td>
                 <td className="px-4 py-2.5 text-zinc-400">{r.project_tag ? <span className="inline-flex items-center gap-1 text-xs"><Tag size={11} />{r.project_tag}</span> : ''}</td>
+                <td className="px-4 py-2.5 text-right text-zinc-500">{fmt(effectiveSubtotalCents(r))}</td>
                 <td className="px-4 py-2.5 text-right text-zinc-500">{fmt(r.tax_cents)}</td>
                 <td className="px-4 py-2.5 text-right font-semibold text-emerald-400">{fmt(r.total_cents)}</td>
                 <td className="px-2 py-2.5">
@@ -270,7 +331,7 @@ function ReceiptsView({ categories, refreshKey, bump }) {
               </tr>
             ))}
             {!receipts.length && (
-              <tr><td colSpan={7} className="px-4 py-10 text-center text-zinc-600">No receipts yet — drop an image above to scan your first one.</td></tr>
+              <tr><td colSpan={8} className="px-4 py-10 text-center text-zinc-600">No receipts yet — drop an image above to scan your first one.</td></tr>
             )}
           </tbody>
         </table>
