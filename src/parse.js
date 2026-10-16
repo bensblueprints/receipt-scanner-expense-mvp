@@ -11,7 +11,56 @@ const TOTAL_KEYWORDS = /\b(TOTAL|AMOUNT\s*DUE|BALANCE(?:\s*DUE)?|GRAND\s*TOTAL)\
 // "SUBTOTAL" must not count as a TOTAL line — handled by stripping it first.
 const SUBTOTAL_RE = /SUB\s*[- ]?\s*TOTAL/i;
 const TAX_KEYWORDS = /\b(TAX|VAT|GST|HST|PST|TAK|TAM)\b/i; // TAK/TAM: common tesseract misreads of TAX on thermal paper
-const MONEY_RE = /(?:[$€£])?\s*([\d,]+\.\d{2})/g;
+const MONEY_RE = /(?:[$€£])?\s*([\d,]+\.\s?\d{2})/g;
+
+// ---- OCR spell-correction ---------------------------------------------
+// Tesseract routinely swaps a letter or two on thermal-print keywords
+// ("TODAL", "V1SA", "MASTERCARO", "BIESEL"). We snap fully-uppercase tokens
+// to the nearest receipt-domain word within a small edit distance, so every
+// downstream regex sees canonical spelling. Proper nouns (merchant names)
+// are never touched — correction applies to uppercase label tokens only.
+const KEYWORD_DICT = [
+  'TOTAL', 'SUBTOTAL', 'TAX', 'SALES', 'CASH', 'CHANGE', 'DUE', 'PAYMENT', 'PAYMENTS',
+  'RECEIVED', 'BALANCE', 'AMOUNT', 'VISA', 'MASTERCARD', 'MASTER', 'AMERICAN', 'EXPRESS',
+  'DISCOVER', 'MERCHANT', 'DIESEL', 'UNLEADED', 'FUEL', 'REGULAR', 'PREMIUM', 'RECEIPT',
+  'DUPLICATE', 'INVOICE', 'PURCHASE', 'APPROVED', 'AUTH', 'DEBIT', 'CREDIT', 'CARD',
+  'CHIP', 'THANK', 'CUSTOMER', 'TERMINAL', 'BATCH', 'RESPONSE', 'DATE', 'TIME', 'QTY',
+  'PRICE', 'GAL', 'GALLONS'
+];
+
+function editDistance(a, b) {
+  const m = a.length;
+  const n = b.length;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+function correctWord(word) {
+  if (word.length < 3 || KEYWORD_DICT.includes(word)) return word;
+  const maxDist = word.length >= 7 ? 2 : 1;
+  let best = null;
+  let bestD = Infinity;
+  for (const target of KEYWORD_DICT) {
+    if (Math.abs(target.length - word.length) > maxDist) continue;
+    const d = editDistance(word, target);
+    if (d < bestD) {
+      bestD = d;
+      best = target;
+    }
+  }
+  return bestD <= maxDist ? best : word;
+}
+
+function normalizeKeywords(text) {
+  return String(text || '').replace(/[A-Z][A-Z0-9'&]{2,}/g, (w) => correctWord(w));
+}
 // Lines that carry money but are never merchandise: payment/tender/card
 // trailers. Item collection also stops outright at the first TOTAL line.
 const NON_ITEM_KEYWORDS = /\b(CASH|CHANGE|TENDER|PAYMENT|VISA|MASTERCARD|AMEX|DISCOVER|DEBIT|CREDIT|CARD|AUTH(?:ORIZATION)?|APPROVAL|REF\s|TIP|GRATUITY)\b/i;
@@ -53,6 +102,7 @@ function looksLikeNonVendor(line) {
   if (PHONE_RE.test(line)) return true;
   if (ADDRESS_RE.test(line)) return true;
   if (/\b[A-Z]{2}\s+\d{5}(-\d{4})?\b/.test(line)) return true; // "CHICAGO, IL 60608"
+  if (/,\s*[A-Z]{2}\s+[A-Z0-9]{4,6}\W*$/.test(line)) return true; // misread zip ("IL BOBS" for 60608)
   if (NON_VENDOR_WORDS.test(line)) return true;
   if (moneyIn(line).length) return true; // priced line (item/total), not a name
   if (!/[A-Za-z]{2,}/.test(line)) return true; // a name needs letters
@@ -115,20 +165,22 @@ function extractVendor(lines) {
   if (!best) return '';
   return best
     .replace(/[^\w\s#'&.,()/\-]/gu, ' ') // drop OCR symbol junk
+    .replace(/^[a-z]{1,3}\s+(?=[A-Z]{2})/, '') // leading stray fragment ("oe ORNTON'S" -> "ORNTON'S")
     .replace(/\s{2,}/g, ' ')
     .replace(/[\s.,#]+$/, '')
     .trim();
 }
 
-// Bank / card processor: explicit labels first ("ISSUER:", "BANK:", ...),
+// Bank / card processor: explicit labels first ("ISSUER:", "BANK:", ...) —
+// anchored to line start so "card issuer agreement" footer text can't match —
 // then a scan for known institution/processor names anywhere on the slip.
-const BANK_LABEL_RE = /\b(?:ISSUER|ISSUING\s+BANK|ACQUIRER|PROCESSOR|BANK)\b\s*[:#\-–—]?\s*(.+)/i;
+const BANK_LABEL_RE = /^[^A-Za-z]{0,4}(?:ISSUER|ISSUING\s+BANK|ACQUIRER|PROCESSOR|BANK)\b\s*[:#\-–—]?\s*(.+)/i;
 const KNOWN_BANKS_RE = new RegExp(
   '\\b(' +
     [
       'Bank of America', 'Wells Fargo', 'JPMorgan Chase', 'Chase', 'Citibank', 'Citi',
       'Capital One', 'U\\.?S\\.? Bank', 'PNC', 'Truist', 'TD Bank', 'American Express',
-      'Amex', 'Discover', 'Barclays', 'HSBC', 'Navy Federal', 'USAA', 'Fifth Third',
+      'Amex', 'Discover', 'Visa', 'Master\\s?card', 'Maestro', 'Barclays', 'HSBC', 'Navy Federal', 'USAA', 'Fifth Third',
       'KeyBank', 'Regions', 'Citizens', 'Huntington', 'Ally', 'Synchrony', 'BMO',
       'Santander', 'Union Bank', 'Comerica', 'Zions', 'Frost', 'WebBank',
       // common POS processors that print their name where the bank would be
@@ -143,7 +195,7 @@ function extractBankName(text) {
   const lines = linesOf(text);
   for (const line of lines) {
     const m = line.match(BANK_LABEL_RE);
-    if (m && m[1].trim().length >= 2 && !moneyIn(m[1]).length && !/\d{6,}/.test(m[1])) {
+    if (m && m[1].trim().length >= 2 && !moneyIn(m[1]).length && !/\d{6,}/.test(m[1]) && !/agreement|voucher/i.test(m[1])) {
       return m[1].trim();
     }
   }
@@ -158,13 +210,17 @@ function moneyIn(line) {
   const out = [];
   let m;
   MONEY_RE.lastIndex = 0;
-  while ((m = MONEY_RE.exec(line))) out.push(parseFloat(m[1].replace(/,/g, '')));
+  // "O.00" is tesseract's classic misread of "0.00"
+  const cleaned = String(line).replace(/[Oo](?=\.\s?\d{2}\b)/g, '0');
+  while ((m = MONEY_RE.exec(cleaned))) out.push(parseFloat(m[1].replace(/[,\s]/g, '')));
   return out;
 }
 
 // Total: max money amount on/next to a TOTAL-keyword line (label and value are
 // often split across OCR lines); fallback = largest money-shaped number anywhere.
-function extractTotalCents(text) {
+// opts.strict: keyword lines only, no global fallback (lets callers substitute
+// a better source, e.g. the subtotal, before resorting to guessing).
+function extractTotalCents(text, opts = {}) {
   const lines = linesOf(text);
   const candidates = [];
 
@@ -175,6 +231,7 @@ function extractTotalCents(text) {
     }
   });
   if (candidates.length) return toCents(Math.max(...candidates));
+  if (opts.strict) return null;
 
   const all = moneyIn(String(text || '').replace(/\r?\n/g, ' '));
   return all.length ? toCents(Math.max(...all)) : null;
@@ -226,13 +283,15 @@ function extractLineItems(text) {
     if (looksLikeDateOrNumber(line) || /\d{1,2}:\d{2}/.test(line)) continue; // dates/times
     const amounts = moneyIn(line);
     if (!amounts.length) continue;
+    const amount = amounts[amounts.length - 1];
+    if (amount === 0) continue; // "0.00" lines are totals-section noise, not merchandise
     const description = line
       .replace(MONEY_RE, '')
       .replace(/[$€£]/g, '')
       .replace(/\s{2,}/g, ' ')
       .trim();
     if (description.length < 2 || !/[A-Za-z]/.test(description)) continue;
-    items.push({ description, amount_cents: toCents(amounts[amounts.length - 1]) });
+    items.push({ description, amount_cents: toCents(amount) });
   }
   return items.slice(0, 50);
 }
@@ -278,21 +337,56 @@ function extractDate(text, datePref = 'MDY') {
 // The one entry point the app uses: raw OCR text in, prefill suggestion out.
 // All money fields are integer cents (or null when nothing was found).
 function extractFields(text, opts = {}) {
+  text = normalizeKeywords(text); // snap misread keywords to canonical spelling first
   const lines = linesOf(text);
   const vendor = extractVendor(lines);
+  const subtotal_cents = extractSubtotalCents(text);
+  // If no TOTAL-keyword line produced an amount but a SUBTOTAL was found, the
+  // subtotal IS the total (common on fuel/POS slips). Global-max guessing is
+  // the last resort.
+  const total_cents =
+    extractTotalCents(text, { strict: true }) ?? subtotal_cents ?? extractTotalCents(text);
   return {
     vendor,
     merchant_name: vendor, // POS terminology — same field, explicit alias
     bank_name: extractBankName(text),
     date: extractDate(text, opts.datePref || 'MDY'),
-    total_cents: extractTotalCents(text),
+    total_cents,
     tax_cents: extractTaxCents(text),
-    subtotal_cents: extractSubtotalCents(text),
+    subtotal_cents,
     items: extractLineItems(text)
   };
 }
 
+// Combine several OCR passes of the same receipt: majority vote per scalar
+// field, ties broken toward the highest-confidence pass (list order).
+// Line items come from the best pass (rows don't align across passes).
+function voteFields(parsedPasses) {
+  const out = {};
+  for (const key of ['vendor', 'date', 'total_cents', 'tax_cents', 'subtotal_cents', 'bank_name']) {
+    const counts = new Map(); // value -> votes, insertion order = confidence order
+    for (const p of parsedPasses) {
+      const v = p[key];
+      if (v == null || v === '') continue;
+      counts.set(v, (counts.get(v) || 0) + 1);
+    }
+    let best = null;
+    let bestVotes = 0;
+    for (const [v, n] of counts) {
+      if (n > bestVotes) {
+        best = v;
+        bestVotes = n;
+      }
+    }
+    out[key] = best;
+  }
+  out.items = (parsedPasses[0] && parsedPasses[0].items) || [];
+  out.merchant_name = out.vendor;
+  return out;
+}
+
 module.exports = {
   extractFields, extractVendor, extractDate, extractTotalCents, extractTaxCents,
-  extractSubtotalCents, extractLineItems, extractBankName, extractMerchantName, toCents
+  extractSubtotalCents, extractLineItems, extractBankName, extractMerchantName,
+  normalizeKeywords, voteFields, toCents
 };

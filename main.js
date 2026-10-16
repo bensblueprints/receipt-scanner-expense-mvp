@@ -36,21 +36,25 @@ function storeImage(sourcePath) {
   return dest;
 }
 
-// OCR + heuristic parse -> prefill only. NEVER writes to the DB.
+// OCR (multi-pass) + heuristic parse with per-field voting -> prefill only.
+// NEVER writes to the DB.
 async function extractPrefill(storedPath) {
-  let rawText = '';
+  let passes = [];
   let ocrError = null;
   if (ocr.ocrAvailable()) {
     try {
-      rawText = await ocr.recognize(storedPath);
+      passes = await ocr.recognizeAll(storedPath);
     } catch (e) {
       ocrError = e.message;
     }
   } else {
     ocrError = 'OCR language data not downloaded yet (run: node scripts/fetch-ocr-data.js)';
   }
+  passes.sort((a, b) => b.confidence - a.confidence);
+  const rawText = passes.length ? passes[0].text : '';
   const datePref = db.getSetting('date_pref', 'MDY');
-  const fields = parse.extractFields(rawText, { datePref });
+  const parsed = passes.map((p) => parse.extractFields(p.text, { datePref }));
+  const fields = parsed.length ? parse.voteFields(parsed) : parse.extractFields('', { datePref });
   return { image_path: storedPath, ocr_raw_text: rawText, fields, ocrError };
 }
 

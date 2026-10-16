@@ -1,6 +1,6 @@
 {
   "name": "snapreceipt",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Local receipt scanner + expense logger. OCR runs 100% on your machine, prefills a review form — you decide what gets saved. Pay once, own it forever.",
   "author": "Ben (bensblueprints)",
   "license": "MIT",
@@ -17,6 +17,7 @@
     "better-sqlite3": "^12.2.0",
     "date-fns": "^4.4.0",
     "pdf-lib": "^1.17.1",
+    "pureimage": "^0.4.18",
     "tesseract.js": "7.0.0",
     "tesseract.js-core": "7.0.0"
   },
@@ -27,7 +28,6 @@
     "electron-builder": "^25.1.8",
     "framer-motion": "^11.18.2",
     "lucide-react": "^0.474.0",
-    "pureimage": "^0.4.18",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tailwindcss": "^4.1.0",
