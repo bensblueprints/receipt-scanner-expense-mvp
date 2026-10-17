@@ -20,7 +20,7 @@ let db;
 let win;
 let watcher = null;
 
-const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tif', '.tiff']);
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tif', '.tiff', '.avif', '.heic', '.heif']);
 
 function receiptsDir() {
   const dir = path.join(app.getPath('userData'), 'receipts');
@@ -211,7 +211,7 @@ function registerIpc() {
   ipcMain.handle('dialog:pick-images', async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog(win, {
       properties: ['openFile', 'multiSelections'],
-      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'tif', 'tiff'] }]
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'tif', 'tiff', 'avif', 'heic', 'heif'] }]
     });
     return canceled ? [] : filePaths;
   });

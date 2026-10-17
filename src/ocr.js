@@ -11,9 +11,7 @@
 // happen here or anywhere downstream until the user explicitly saves.
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
-const crypto = require('crypto');
-const PImage = require('pureimage');
+const sharp = require('sharp');
 const { createWorker } = require('tesseract.js');
 
 const ASSETS_DIR = path.join(__dirname, '..', 'ocr-assets');
@@ -23,64 +21,60 @@ function ocrAvailable() {
   return fs.existsSync(LANG_FILE) && fs.statSync(LANG_FILE).size > 1024 * 1024;
 }
 
-// Preprocess photos for tesseract: phone pics of receipts are small, skewed
-// and low-contrast. We produce TWO enhanced variants — (a) upscaled +
-// grayscale + contrast-stretched, (b) the same but binarized to pure b/w —
-// and run OCR on both plus the original, keeping whichever pass reports the
-// highest confidence. Falls back to just the original for formats pureimage
-// can't decode (tiff/bmp/webp — tesseract reads those itself).
-function luminance(d, i) {
-  return (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000;
+// HEIC/HEIF (iPhone photos) isn't in sharp's prebuilt libvips (patent) —
+// decode those with heic-convert (pure JS) and hand sharp the PNG.
+function isHeif(buf) {
+  return (
+    buf.length > 12 &&
+    buf.toString('ascii', 4, 8) === 'ftyp' &&
+    /^(heic|heix|hevc|hevx|heim|heis|hevm|hevs|mif1|msf1)$/.test(buf.toString('ascii', 8, 12)) &&
+    !/^(avif|avis)$/.test(buf.toString('ascii', 8, 12)) // avif IS handled by sharp
+  );
 }
 
-async function writePng(bitmap, suffix) {
-  const tmp = path.join(os.tmpdir(), `snapreceipt-ocr-${suffix}-${crypto.randomBytes(6).toString('hex')}.png`);
-  await PImage.encodePNGToStream(bitmap, fs.createWriteStream(tmp));
-  return tmp;
-}
-
-async function preprocessVariants(imagePath) {
-  let img;
+// Open any realistic phone/image format as a sharp pipeline with EXIF
+// auto-orientation applied (phone pics are frequently stored rotated).
+// sharp sniffs the real format from content — the extension is irrelevant,
+// so "receipt.jpeg" that is secretly AVIF still works.
+async function openImage(imagePath) {
+  const head = Buffer.alloc(16);
+  const fd = fs.openSync(imagePath, 'r');
   try {
-    const lower = imagePath.toLowerCase();
-    const stream = fs.createReadStream(imagePath);
-    img = /\.jpe?g$/.test(lower)
-      ? await PImage.decodeJPEGFromStream(stream)
-      : await PImage.decodePNGFromStream(stream);
+    fs.readSync(fd, head, 0, 16, 0);
+  } finally {
+    fs.closeSync(fd);
+  }
+  if (isHeif(head)) {
+    const convert = require('heic-convert');
+    const png = await convert({ buffer: fs.readFileSync(imagePath), format: 'PNG' });
+    return sharp(Buffer.from(png)).rotate();
+  }
+  return sharp(imagePath).rotate();
+}
+
+// Preprocess for tesseract: resize small photos up, grayscale, contrast
+// stretch — plus a pure b/w variant. OCR runs on BOTH variants (and the
+// original when tesseract can read it), highest confidence wins.
+async function preprocessVariants(imagePath) {
+  let base;
+  try {
+    base = await openImage(imagePath);
+    await base.metadata(); // force decode now so we can fall back cleanly
   } catch {
-    return { files: [imagePath], temps: [] };
+    return { variants: [imagePath] }; // last resort: tesseract tries the file itself
   }
-  const scale = Math.min(5, Math.max(1, 2000 / img.width));
-  const w = Math.round(img.width * scale);
-  const h = Math.round(img.height * scale);
-
-  const stretched = PImage.make(w, h);
-  stretched.getContext('2d').drawImage(img, 0, 0, img.width, img.height, 0, 0, w, h);
-  const d = stretched.data;
-  let min = 255;
-  let max = 0;
-  for (let i = 0; i < d.length; i += 4) {
-    const l = luminance(d, i);
-    if (l < min) min = l;
-    if (l > max) max = l;
-  }
-  const range = Math.max(1, max - min);
-  for (let i = 0; i < d.length; i += 4) {
-    const g = Math.max(0, Math.min(255, ((luminance(d, i) - min) * 255) / range));
-    d[i] = d[i + 1] = d[i + 2] = g;
-  }
-
-  const binary = PImage.make(w, h);
-  binary.getContext('2d').drawImage(stretched, 0, 0);
-  const b = binary.data;
-  for (let i = 0; i < b.length; i += 4) {
-    const g = luminance(b, i) > 140 ? 255 : 0;
-    b[i] = b[i + 1] = b[i + 2] = g;
-  }
-
-  const contrastPath = await writePng(stretched, 'contrast');
-  const binaryPath = await writePng(binary, 'bin');
-  return { files: [contrastPath, binaryPath, imagePath], temps: [contrastPath, binaryPath] };
+  const meta = await base.metadata();
+  const width = Math.min(Math.max(meta.width || 1200, 1200), 2400);
+  const normalized = base.resize({ width });
+  const contrast = await normalized.clone().grayscale().normalize().png().toBuffer();
+  const binary = await normalized.clone().grayscale().normalize().threshold(140).png().toBuffer();
+  const variants = [contrast, binary];
+  // Include the untouched original as a third pass only when tesseract
+  // (leptonica) can actually read the DETECTED format — a ".jpeg" file that
+  // is secretly AVIF would crash it.
+  const leptonicaFormats = new Set(['jpeg', 'png', 'tiff', 'bmp', 'gif', 'webp']);
+  if (leptonicaFormats.has(meta.format)) variants.push(imagePath);
+  return { variants };
 }
 
 let workerPromise = null;
@@ -112,18 +106,19 @@ async function recognizeAll(imagePath) {
   if (!ocrAvailable()) {
     throw new Error('OCR language data missing — run: node scripts/fetch-ocr-data.js');
   }
-  const { files, temps } = await preprocessVariants(imagePath);
+  const { variants } = await preprocessVariants(imagePath);
   const worker = await getWorker();
-  try {
-    const passes = [];
-    for (const f of files) {
-      const { data } = await worker.recognize(f);
+  const passes = [];
+  for (const v of variants) {
+    try {
+      const { data } = await worker.recognize(v);
       passes.push({ text: data.text || '', confidence: data.confidence ?? 0 });
+    } catch {
+      // one unreadable variant must not sink the whole scan
     }
-    return passes;
-  } finally {
-    for (const t of temps) fs.rmSync(t, { force: true });
   }
+  if (!passes.length) throw new Error('OCR could not read this image (unsupported or corrupt file)');
+  return passes;
 }
 
 // Single-text convenience wrapper: highest-confidence pass wins.
