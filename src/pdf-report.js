@@ -12,6 +12,7 @@ const INK = rgb(0.13, 0.13, 0.16);
 const MUTED = rgb(0.45, 0.45, 0.5);
 const ACCENT = rgb(0.15, 0.5, 0.35);
 const LINE = rgb(0.85, 0.85, 0.88);
+const WARN = rgb(0.8, 0.55, 0.05);
 
 function fmt(cents) {
   return cents == null ? '—' : '$' + (cents / 100).toFixed(2);
@@ -63,7 +64,11 @@ async function buildExpenseReportPdf({ title = 'Expense Report', receipts = [], 
     for (const row of rows) {
       newPageIfNeeded(16);
       x = PAGE.margin;
-      row.forEach((cell, i) => { text(String(cell), x, 9); x += widths[i]; });
+      row.forEach((cell, i) => {
+        const flagged = typeof cell === 'object' && cell !== null && cell.warn;
+        text(flagged ? cell.text : String(cell), x, 9, flagged ? bold : font, flagged ? WARN : INK);
+        x += widths[i];
+      });
       y -= 14;
     }
     y -= 16;
@@ -78,8 +83,26 @@ async function buildExpenseReportPdf({ title = 'Expense Report', receipts = [], 
       byMonth.map((m) => [m.month || '—', m.count, fmt(m.total_cents)]));
   }
   if (receipts.length) {
-    table('Receipts', ['Date', 'Vendor', 'Category', 'Project', 'Total'], [70, 170, 100, 90, 80],
-      receipts.map((r) => [r.date || '—', (r.vendor || '').slice(0, 34), r.category || '', (r.project_tag || '').slice(0, 16), fmt(r.total_cents)]));
+    table('Receipts', ['Date', 'Vendor', 'Category', 'Project', 'Total', 'Flag'], [70, 160, 100, 80, 70, 30],
+      receipts.map((r) => [
+        r.date || '—',
+        (r.vendor || '').slice(0, 32),
+        r.category || '',
+        (r.project_tag || '').slice(0, 14),
+        fmt(r.total_cents),
+        Array.isArray(r.warnings) && r.warnings.length ? { text: '!', warn: true } : ''
+      ]));
+    const flagged = receipts.filter((r) => Array.isArray(r.warnings) && r.warnings.length);
+    if (flagged.length) {
+      text('! = numbers don\'t add up — double-check these receipts before filing:', PAGE.margin, 9, bold, WARN);
+      y -= 12;
+      for (const r of flagged) {
+        newPageIfNeeded(14);
+        text(`${r.date || '—'} ${r.vendor || 'Unknown'}: ${r.warnings.join('; ')}`, PAGE.margin + 10, 8, font, MUTED);
+        y -= 11;
+      }
+      y -= 10;
+    }
   }
   if (mileage.length) {
     table('Mileage', ['Date', 'Purpose', 'Miles', 'Rate', 'Amount'], [70, 200, 70, 80, 80],

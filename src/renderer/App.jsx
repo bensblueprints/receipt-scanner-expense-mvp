@@ -165,6 +165,18 @@ function ReviewForm({ draft, categories, onSaved, onCancel }) {
               OCR prefilled these fields — nothing is saved until you hit Save. Fix anything it got wrong.
             </p>
           )}
+          {draft.flags?.lowQuality && (
+            <p className="flex items-start gap-2 rounded-lg border border-amber-900/50 bg-amber-950/40 px-3 py-2 text-xs text-amber-300">
+              <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+              Low-quality image (OCR confidence {draft.flags.bestConfidence}%). Double-check every field — next time shoot sharper, closer and brighter.
+            </p>
+          )}
+          {draft.flags?.fields?.length > 0 && (
+            <p className="flex items-start gap-2 rounded-lg border border-amber-900/50 bg-amber-950/40 px-3 py-2 text-xs text-amber-300">
+              <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+              The OCR passes disagreed on: {draft.flags.fields.map((k) => ({ total_cents: 'Total', subtotal_cents: 'Subtotal', tax_cents: 'Tax', date: 'Date', vendor: 'Vendor', bank_name: 'Bank' }[k] || k)).join(', ')}. Compare them against the photo before saving.
+            </p>
+          )}
           {warnings.map((w) => (
             <p key={w} className="flex items-start gap-2 rounded-lg border border-amber-900/50 bg-amber-950/40 px-3 py-2 text-xs text-amber-300">
               <AlertTriangle size={14} className="mt-0.5 shrink-0" /> {w}
@@ -343,7 +355,14 @@ function ReceiptsView({ categories, refreshKey, bump }) {
                 <td className="px-4 py-2.5 text-zinc-400">{r.project_tag ? <span className="inline-flex items-center gap-1 text-xs"><Tag size={11} />{r.project_tag}</span> : ''}</td>
                 <td className="px-4 py-2.5 text-right text-zinc-500">{fmt(effectiveSubtotalCents(r))}</td>
                 <td className="px-4 py-2.5 text-right text-zinc-500">{fmt(r.tax_cents)}</td>
-                <td className="px-4 py-2.5 text-right font-semibold text-emerald-400">{fmt(r.total_cents)}</td>
+                <td className="px-4 py-2.5 text-right font-semibold text-emerald-400">
+                  {r.warnings?.length > 0 && (
+                    <span className="mr-1 inline-flex align-middle text-amber-400" title={r.warnings.join('\n')}>
+                      <AlertTriangle size={13} />
+                    </span>
+                  )}
+                  {fmt(r.total_cents)}
+                </td>
                 <td className="px-2 py-2.5">
                   <div className="flex justify-end gap-1">
                     <button className="rounded p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200" onClick={() => setDraft(r)}><Pencil size={14} /></button>

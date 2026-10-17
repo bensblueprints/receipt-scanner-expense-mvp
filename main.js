@@ -12,6 +12,7 @@ const crypto = require('crypto');
 const { openDb } = require('./src/db');
 const parse = require('./src/parse');
 const ocr = require('./src/ocr');
+const { receiptWarnings } = require('./src/checks');
 const { receiptsCsv, mileageCsv } = require('./src/csv');
 const { buildExpenseReportPdf } = require('./src/pdf-report');
 
@@ -55,7 +56,20 @@ async function extractPrefill(storedPath) {
   const datePref = db.getSetting('date_pref', 'MDY');
   const parsed = passes.map((p) => parse.extractFields(p.text, { datePref }));
   const fields = parsed.length ? parse.voteFields(parsed) : parse.extractFields('', { datePref });
-  return { image_path: storedPath, ocr_raw_text: rawText, fields, ocrError };
+
+  // Uncertainty flags for the review form:
+  //  - disagreement: the OCR passes extracted DIFFERENT values for a field
+  //    (one pass read 6.11, another 6.41) -> user must eyeball that field
+  //  - lowQuality: even the best pass is unconfident -> the photo itself is
+  //    the problem; suggest a sharper, higher-res retake
+  const flags = { fields: [], lowQuality: false, bestConfidence: passes.length ? Math.round(passes[0].confidence) : 0 };
+  for (const key of ['total_cents', 'subtotal_cents', 'tax_cents', 'date', 'vendor', 'bank_name']) {
+    const distinct = new Set(parsed.map((p) => p[key]).filter((v) => v != null && v !== ''));
+    if (distinct.size > 1) flags.fields.push(key);
+  }
+  if (passes.length && passes[0].confidence < 50) flags.lowQuality = true;
+
+  return { image_path: storedPath, ocr_raw_text: rawText, fields, flags, ocrError };
 }
 
 function startWatcher() {
@@ -109,7 +123,10 @@ function registerIpc() {
 
   // ---- receipts CRUD (save = the ONLY way a row is created) ----
   ipcMain.handle('receipts:save', (_e, data) => db.saveReceipt(data));
-  ipcMain.handle('receipts:list', (_e, filters) => db.listReceipts(filters || {}));
+  ipcMain.handle('receipts:list', (_e, filters) => {
+    const rows = db.listReceipts(filters || {});
+    return rows.map((r) => ({ ...r, warnings: receiptWarnings(r, db.getItems(r.id)) }));
+  });
   ipcMain.handle('receipts:get-items', (_e, id) => db.getItems(id));
   ipcMain.handle('receipts:update', (_e, { id, patch }) => db.updateReceipt(id, patch));
   ipcMain.handle('receipts:delete', (_e, id) => {
@@ -154,7 +171,9 @@ function registerIpc() {
       filters: [{ name: 'CSV', extensions: ['csv'] }]
     });
     if (canceled || !filePath) return null;
-    fs.writeFileSync(filePath, receiptsCsv(db.listReceipts(filters || {})));
+    const rows = db.listReceipts(filters || {})
+      .map((r) => ({ ...r, warnings: receiptWarnings(r, db.getItems(r.id)) }));
+    fs.writeFileSync(filePath, receiptsCsv(rows));
     shell.showItemInFolder(filePath);
     return filePath;
   });
@@ -174,7 +193,8 @@ function registerIpc() {
       filters: [{ name: 'PDF', extensions: ['pdf'] }]
     });
     if (canceled || !filePath) return null;
-    const receipts = db.listReceipts(filters || {});
+    const receipts = db.listReceipts(filters || {})
+      .map((r) => ({ ...r, warnings: receiptWarnings(r, db.getItems(r.id)) }));
     const bytes = await buildExpenseReportPdf({
       title: filters && filters.month ? `Expense Report — ${filters.month}` : 'Expense Report',
       receipts,

@@ -22,6 +22,7 @@ const { spawnSync } = require('child_process');
 const { openDb, mileageAmountCents } = require('../src/db');
 const parse = require('../src/parse');
 const ocr = require('../src/ocr');
+const { receiptWarnings } = require('../src/checks');
 const { receiptsCsv } = require('../src/csv');
 const { buildExpenseReportPdf } = require('../src/pdf-report');
 const { generateReceiptPng } = require('./gen-fixture');
@@ -122,11 +123,20 @@ function ok(name) {
     db.saveReceipt({ vendor: 'Vendor, "Fancy"', date: '2026-07-04', total_cents: 999, category: 'Other' });
     const csv = receiptsCsv(db.listReceipts({ month: '2026-07' }));
     const lines = csv.trim().split('\r\n');
-    assert.strictEqual(lines[0], 'date,vendor,category,project_tag,total,tax,subtotal,bank_name', 'CSV header');
+    assert.strictEqual(lines[0], 'date,vendor,category,project_tag,total,tax,subtotal,bank_name,warning', 'CSV header');
     assert.strictEqual(lines.length - 1, 4, 'CSV row count matches July receipts');
     assert(csv.includes('23.45'), 'CSV contains OCR-derived total as decimal');
     assert(csv.includes('"Vendor, ""Fancy"""'), 'comma+quote vendor RFC4180-escaped');
     ok('CSV export: header, row count, saved OCR row present, escaping survives');
+
+    // ===== 4b. math-mismatch warnings (the flag shown in app/CSV/PDF) =====
+    const mismatched = db.saveReceipt({ vendor: 'Shady Gas', date: '2026-07-06', total_cents: 641, tax_cents: 0, subtotal_cents: 611, category: 'Fuel' });
+    const w = receiptWarnings(mismatched, db.getItems(mismatched.id));
+    assert.strictEqual(w.length, 1, 'one warning for broken subtotal+tax identity');
+    assert(/subtotal\+tax/.test(w[0]), `warning names the broken identity (got ${w[0]})`);
+    assert.strictEqual(receiptWarnings({ total_cents: 611, tax_cents: 0, subtotal_cents: 611 }, []).length, 0, 'consistent math not flagged');
+    assert.strictEqual(receiptWarnings({ total_cents: 1000 }, []).length, 0, 'missing data never false-flags');
+    ok('warning check: broken math flagged for dashboard/CSV/PDF, clean or incomplete math stays quiet');
 
     // ===== 5. PDF expense report with thumbnail =====
     const pdfBytes = await buildExpenseReportPdf({

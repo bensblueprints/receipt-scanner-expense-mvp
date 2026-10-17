@@ -11,7 +11,7 @@ function centsToDecimal(cents) {
 }
 
 function receiptsCsv(receipts) {
-  const header = ['date', 'vendor', 'category', 'project_tag', 'total', 'tax', 'subtotal', 'bank_name'];
+  const header = ['date', 'vendor', 'category', 'project_tag', 'total', 'tax', 'subtotal', 'bank_name', 'warning'];
   const rows = receipts.map((r) => [
     r.date || '',
     r.vendor || '',
@@ -20,7 +20,8 @@ function receiptsCsv(receipts) {
     centsToDecimal(r.total_cents),
     centsToDecimal(r.tax_cents),
     centsToDecimal(r.subtotal_cents),
-    r.bank_name || ''
+    r.bank_name || '',
+    Array.isArray(r.warnings) ? r.warnings.join('; ') : ''
   ]);
   return [header, ...rows].map((row) => row.map(csvEscape).join(',')).join('\r\n') + '\r\n';
 }

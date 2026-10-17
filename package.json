@@ -1,6 +1,6 @@
 {
   "name": "snapreceipt",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Local receipt scanner + expense logger. OCR runs 100% on your machine, prefills a review form — you decide what gets saved. Pay once, own it forever.",
   "author": "Ben (bensblueprints)",
   "license": "MIT",
