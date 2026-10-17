@@ -33,6 +33,7 @@ contextBridge.exposeInMainWorld('snap', {
   pickImages: () => ipcRenderer.invoke('dialog:pick-images'),
   pickFolder: () => ipcRenderer.invoke('dialog:pick-folder'),
   ocrAvailable: () => ipcRenderer.invoke('app:ocr-available'),
+  cloudOcr: (imagePath) => ipcRenderer.invoke('ocr:cloud', imagePath),
 
   onWatchedReceipt: (cb) => {
     const listener = (_e, prefill) => cb(prefill);

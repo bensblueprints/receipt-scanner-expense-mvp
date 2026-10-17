@@ -100,6 +100,30 @@ function getWorker() {
   return workerPromise;
 }
 
+// Tesseract's reading order scrambles multi-column layouts (letterheads with
+// a logo left and address right come out as interleaved fragments). Every
+// OCR line carries bounding-box coordinates — rebuild the text by VISUAL
+// rows (group by y, order by x) so each physical line stays whole.
+function reconstructVisualText(lines) {
+  if (!Array.isArray(lines) || !lines.length) return '';
+  const sorted = [...lines].sort((a, b) => a.bbox.y0 - b.bbox.y0 || a.bbox.x0 - b.bbox.x0);
+  const rows = [];
+  for (const l of sorted) {
+    const h = Math.max(1, l.bbox.y1 - l.bbox.y0);
+    const last = rows[rows.length - 1];
+    if (last && Math.abs(l.bbox.y0 - last.y0) <= Math.max(6, ((last.h + h) / 2) * 0.6)) {
+      last.items.push(l);
+      last.h = Math.max(last.h, h);
+    } else {
+      rows.push({ y0: l.bbox.y0, h, items: [l] });
+    }
+  }
+  return rows
+    .map((r) => r.items.sort((a, b) => a.bbox.x0 - b.bbox.x0).map((l) => l.text.trim()).filter(Boolean).join(' '))
+    .filter(Boolean)
+    .join('\n');
+}
+
 // Recognize an image file (path) -> one result per OCR pass
 // [{text, confidence}], unsorted. Fully local.
 async function recognizeAll(imagePath) {
@@ -112,10 +136,23 @@ async function recognizeAll(imagePath) {
   for (const v of variants) {
     try {
       const { data } = await worker.recognize(v);
-      passes.push({ text: data.text || '', confidence: data.confidence ?? 0 });
+      const rebuilt = reconstructVisualText(data.lines);
+      passes.push({ text: rebuilt || data.text || '', confidence: data.confidence ?? 0 });
     } catch {
       // one unreadable variant must not sink the whole scan
     }
+  }
+  // Extra pass in uniform-block mode (PSM 6): better on letterheads and
+  // documents that aren't one clean receipt column.
+  try {
+    await worker.setParameters({ tessedit_pageseg_mode: '6' });
+    const { data } = await worker.recognize(variants[0]);
+    const rebuilt = reconstructVisualText(data.lines);
+    passes.push({ text: rebuilt || data.text || '', confidence: data.confidence ?? 0 });
+  } catch {
+    // optional pass — ignore failures
+  } finally {
+    try { await worker.setParameters({ tessedit_pageseg_mode: '4' }); } catch {}
   }
   if (!passes.length) throw new Error('OCR could not read this image (unsupported or corrupt file)');
   return passes;

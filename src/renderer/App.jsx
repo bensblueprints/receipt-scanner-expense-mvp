@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   ReceiptText, Upload, FolderSearch, BarChart3, Car, Settings as SettingsIcon,
   Trash2, Pencil, FileDown, FileText, Save, X, ScanLine, Loader2, Plus,
-  FolderOpen, Tag, AlertTriangle, Inbox
+  FolderOpen, Tag, AlertTriangle, Inbox, CloudUpload
 } from 'lucide-react';
 
 const fmt = (cents) => (cents == null || cents === '' ? '—' : `$${(cents / 100).toFixed(2)}`);
@@ -72,10 +72,39 @@ function ReviewForm({ draft, categories, onSaved, onCancel }) {
   const [projectTag, setProjectTag] = useState(draft.project_tag ?? '');
   const [imgUrl, setImgUrl] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [hasCloudKey, setHasCloudKey] = useState(false);
+  const [cloudBusy, setCloudBusy] = useState(false);
+  const [cloudNote, setCloudNote] = useState(null);
 
   useEffect(() => {
     if (draft.image_path) window.snap.imageDataUrl(draft.image_path).then(setImgUrl);
+    window.snap.getSetting('openai_api_key').then((v) => setHasCloudKey(!!v));
   }, [draft.image_path]);
+
+  // OPTIONAL cloud pass: image goes to the user's own OpenAI account, only
+  // on this explicit click. Result prefills the same form — still user-saved.
+  const runCloud = async () => {
+    setCloudBusy(true);
+    setCloudNote(null);
+    try {
+      const res = await window.snap.cloudOcr(draft.image_path);
+      if (res.error) {
+        setCloudNote(res.error);
+      } else {
+        const f = res.fields;
+        if (f.vendor) setVendor(f.vendor);
+        if (f.date) setDate(f.date);
+        if (f.total_cents != null) setTotal(dollarsFromCents(f.total_cents));
+        if (f.tax_cents != null) setTax(dollarsFromCents(f.tax_cents));
+        if (f.subtotal_cents != null) setSubtotal(dollarsFromCents(f.subtotal_cents));
+        if (f.bank_name) setBank(f.bank_name);
+        if (f.items?.length) setItems(f.items.map((it) => ({ description: it.description, amount: dollarsFromCents(it.amount_cents) })));
+        setCloudNote('ChatGPT prefilled these fields — verify against the photo before saving.');
+      }
+    } finally {
+      setCloudBusy(false);
+    }
+  };
 
   // editing an existing receipt -> load its saved line items
   useEffect(() => {
@@ -182,6 +211,20 @@ function ReviewForm({ draft, categories, onSaved, onCancel }) {
               <AlertTriangle size={14} className="mt-0.5 shrink-0" /> {w}
             </p>
           ))}
+          {hasCloudKey && (
+            <div className="flex items-center gap-2">
+              <Button onClick={runCloud} disabled={cloudBusy || !draft.image_path} className="!py-1.5 text-xs">
+                {cloudBusy ? <Loader2 size={14} className="animate-spin" /> : <CloudUpload size={14} />}
+                {cloudBusy ? 'ChatGPT is reading…' : 'Read with ChatGPT (cloud)'}
+              </Button>
+              <span className="text-[11px] text-zinc-600">sends this image to your OpenAI account</span>
+            </div>
+          )}
+          {cloudNote && (
+            <p className={`rounded-lg border px-3 py-2 text-xs ${cloudNote.startsWith('ChatGPT prefilled') ? 'border-sky-900/50 bg-sky-950/40 text-sky-300' : 'border-amber-900/50 bg-amber-950/40 text-amber-300'}`}>
+              {cloudNote}
+            </p>
+          )}
           <Field label="Vendor"><input className={inputCls} value={vendor} onChange={(e) => setVendor(e.target.value)} placeholder="Coffee House" /></Field>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Date"><input type="date" className={inputCls} value={date || ''} onChange={(e) => setDate(e.target.value)} /></Field>
@@ -524,11 +567,14 @@ function SettingsView({ categories, onCategoriesChanged }) {
   const [datePref, setDatePref] = useState('MDY');
   const [newCat, setNewCat] = useState('');
   const [ocrOk, setOcrOk] = useState(true);
+  const [apiKey, setApiKey] = useState('');
+  const [keySaved, setKeySaved] = useState(false);
 
   useEffect(() => {
     window.snap.getSetting('watch_folder').then((v) => setWatchFolder(v || ''));
     window.snap.getSetting('date_pref').then((v) => setDatePref(v || 'MDY'));
     window.snap.ocrAvailable().then(setOcrOk);
+    window.snap.getSetting('openai_api_key').then((v) => setApiKey(v || ''));
   }, []);
 
   return (
@@ -559,6 +605,26 @@ function SettingsView({ categories, onCategoriesChanged }) {
         </select>
       </div>
       <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5">
+        <h3 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">Cloud OCR (optional)</h3>
+        <p className="mb-3 text-sm text-zinc-500">
+          Local OCR is the default and never sends anything anywhere. Paste your own OpenAI API key and a
+          "Read with ChatGPT" button appears on the review form — useful for handwritten invoices and
+          flagged scans. The image leaves this machine only when you click that button; OpenAI bills your
+          account directly (pennies per scan). The key is stored only in this app's local database.
+        </p>
+        <div className="flex gap-2">
+          <input type="password" className={inputCls} value={apiKey} onChange={(e) => { setApiKey(e.target.value); setKeySaved(false); }} placeholder="sk-..." />
+          <Button variant="primary" onClick={async () => { await window.snap.setSetting('openai_api_key', apiKey.trim()); setKeySaved(true); }}>
+            {keySaved ? 'Saved' : 'Save key'}
+          </Button>
+          {apiKey && (
+            <Button variant="danger" onClick={async () => { await window.snap.setSetting('openai_api_key', ''); setApiKey(''); }}>
+              <X size={15} />
+            </Button>
+          )}
+        </div>
+      </div>
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5">
         <h3 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">Categories</h3>
         <div className="mb-3 flex flex-wrap gap-2">
           {categories.map((c) => <span key={c} className="rounded-full bg-zinc-800 px-3 py-1 text-xs text-zinc-300">{c}</span>)}
@@ -568,7 +634,7 @@ function SettingsView({ categories, onCategoriesChanged }) {
           <Button variant="primary" onClick={async () => { if (newCat.trim()) { await window.snap.addCategory(newCat); setNewCat(''); onCategoriesChanged(); } }}><Plus size={15} /></Button>
         </div>
       </div>
-      <p className="text-xs text-zinc-600">Snapreceipt is 100% local. OCR never leaves this machine and extraction only prefills forms — you review before anything is saved.</p>
+      <p className="text-xs text-zinc-600">Snapreceipt is 100% local by default: OCR never leaves this machine and extraction only prefills forms — you review before anything is saved. The optional Cloud OCR above is off until you add a key, and sends an image only when you click its button.</p>
     </div>
   );
 }

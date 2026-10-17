@@ -12,9 +12,45 @@ const crypto = require('crypto');
 const { openDb } = require('./src/db');
 const parse = require('./src/parse');
 const ocr = require('./src/ocr');
+const sharp = require('sharp');
 const { receiptWarnings } = require('./src/checks');
 const { receiptsCsv, mileageCsv } = require('./src/csv');
 const { buildExpenseReportPdf } = require('./src/pdf-report');
+
+// Prompt for the OPTIONAL cloud OCR (OpenAI vision). Used only when the user
+// has set an API key AND clicks the cloud button — the image leaves the
+// machine only in that explicit case.
+const CLOUD_OCR_PROMPT = `Read this receipt or invoice image — including any HANDWRITTEN text.
+Return ONLY a JSON object:
+{
+  "vendor": string,          // merchant/business name
+  "date": string|null,       // transaction date, YYYY-MM-DD
+  "total": number|null,      // final amount paid, dollars
+  "tax": number|null,
+  "subtotal": number|null,
+  "bank_name": string,       // card brand / bank / "CASH" / "" when unknown
+  "items": [{ "description": string, "amount": number }]
+}
+Use null for anything unreadable. Items only when a price is known.`;
+
+function normalizeCloudFields(c) {
+  const cents = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 100) : null);
+  const fields = {
+    vendor: typeof c.vendor === 'string' ? c.vendor : '',
+    bank_name: typeof c.bank_name === 'string' ? c.bank_name : '',
+    date: typeof c.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(c.date) ? c.date : null,
+    total_cents: cents(c.total),
+    tax_cents: cents(c.tax),
+    subtotal_cents: cents(c.subtotal),
+    items: Array.isArray(c.items)
+      ? c.items
+          .map((it) => ({ description: String((it && it.description) || '').trim(), amount_cents: cents(it && it.amount) }))
+          .filter((it) => it.description || it.amount_cents != null)
+      : []
+  };
+  fields.merchant_name = fields.vendor;
+  return fields;
+}
 
 let db;
 let win;
@@ -220,6 +256,41 @@ function registerIpc() {
     return canceled ? null : filePaths[0];
   });
   ipcMain.handle('app:ocr-available', () => ocr.ocrAvailable());
+
+  // ---- OPTIONAL cloud OCR (OpenAI vision) — only fires when the user has
+  // set their own API key AND explicitly clicks the button in the UI ----
+  ipcMain.handle('ocr:cloud', async (_e, imagePath) => {
+    const apiKey = db.getSetting('openai_api_key');
+    if (!apiKey) return { error: 'No API key — add your OpenAI key in Settings → Cloud OCR first.' };
+    try {
+      const jpeg = await sharp(imagePath)
+        .rotate()
+        .resize({ width: 1500, withoutEnlargement: true })
+        .jpeg({ quality: 85 })
+        .toBuffer();
+      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: db.getSetting('openai_model', 'gpt-4o-mini') || 'gpt-4o-mini',
+          response_format: { type: 'json_object' },
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: CLOUD_OCR_PROMPT },
+              { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${jpeg.toString('base64')}` } }
+            ]
+          }]
+        })
+      });
+      if (!res.ok) return { error: `OpenAI error ${res.status}: ${(await res.text()).slice(0, 200)}` };
+      const json = await res.json();
+      const content = JSON.parse(json.choices[0].message.content);
+      return { fields: normalizeCloudFields(content) };
+    } catch (e) {
+      return { error: `Cloud OCR failed: ${e.message}` };
+    }
+  });
 }
 
 function createWindow() {
