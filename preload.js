@@ -35,6 +35,11 @@ contextBridge.exposeInMainWorld('snap', {
   ocrAvailable: () => ipcRenderer.invoke('app:ocr-available'),
   cloudOcr: (imagePath) => ipcRenderer.invoke('ocr:cloud', imagePath),
 
+  chatgptStatus: () => ipcRenderer.invoke('chatgpt:status'),
+  chatgptSignIn: () => ipcRenderer.invoke('chatgpt:sign-in'),
+  chatgptSignOut: () => ipcRenderer.invoke('chatgpt:sign-out'),
+  openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
+
   onWatchedReceipt: (cb) => {
     const listener = (_e, prefill) => cb(prefill);
     ipcRenderer.on('watch:new-receipt', listener);

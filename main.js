@@ -13,6 +13,7 @@ const { openDb } = require('./src/db');
 const parse = require('./src/parse');
 const ocr = require('./src/ocr');
 const sharp = require('sharp');
+const chatgpt = require('./src/chatgpt');
 const { receiptWarnings } = require('./src/checks');
 const { receiptsCsv, mileageCsv } = require('./src/csv');
 const { buildExpenseReportPdf } = require('./src/pdf-report');
@@ -257,40 +258,122 @@ function registerIpc() {
   });
   ipcMain.handle('app:ocr-available', () => ocr.ocrAvailable());
 
-  // ---- OPTIONAL cloud OCR (OpenAI vision) — only fires when the user has
-  // set their own API key AND explicitly clicks the button in the UI ----
-  ipcMain.handle('ocr:cloud', async (_e, imagePath) => {
-    const apiKey = db.getSetting('openai_api_key');
-    if (!apiKey) return { error: 'No API key — add your OpenAI key in Settings → Cloud OCR first.' };
+  // Open a provider console link in the system browser — https only, and
+  // only hosts we actually link to from Settings.
+  ipcMain.handle('app:open-external', (_e, url) => {
     try {
-      const jpeg = await sharp(imagePath)
-        .rotate()
-        .resize({ width: 1500, withoutEnlargement: true })
-        .jpeg({ quality: 85 })
-        .toBuffer();
-      const res = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model: db.getSetting('openai_model', 'gpt-4o-mini') || 'gpt-4o-mini',
-          response_format: { type: 'json_object' },
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'text', text: CLOUD_OCR_PROMPT },
-              { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${jpeg.toString('base64')}` } }
-            ]
-          }]
-        })
-      });
-      if (!res.ok) return { error: `OpenAI error ${res.status}: ${(await res.text()).slice(0, 200)}` };
-      const json = await res.json();
-      const content = JSON.parse(json.choices[0].message.content);
-      return { fields: normalizeCloudFields(content) };
-    } catch (e) {
-      return { error: `Cloud OCR failed: ${e.message}` };
+      const u = new URL(String(url));
+      const ok = u.protocol === 'https:' && /(^|\.)(openai\.com|chatgpt\.com|volcengine\.com|volces\.com|byteplus\.com)$/.test(u.hostname);
+      if (ok) shell.openExternal(u.toString());
+      return ok;
+    } catch {
+      return false;
     }
   });
+
+  // ---- Sign in with ChatGPT (hand-rolled open-source SIWC flow) ----
+  ipcMain.handle('chatgpt:status', () => chatgpt.status(app));
+  ipcMain.handle('chatgpt:sign-in', async () => {
+    try {
+      const profile = await chatgpt.signIn(app, shell);
+      return { ok: true, email: profile.email, sharing: profile.scopes.includes('chatgpt.tokens.use.direct') };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  });
+  ipcMain.handle('chatgpt:sign-out', () => {
+    chatgpt.signOut(app);
+    return true;
+  });
+
+  // ---- OPTIONAL cloud OCR — user-triggered only. Lanes:
+  //   chatgpt : signed-in ChatGPT account, billed to the user's plan
+  //   openai  : user's own OpenAI API key
+  //   doubao  : user's own Volcano Engine (ByteDance) API key — vision models
+  // 'cloud_provider' setting picks one; 'auto' tries them in that order. ----
+  ipcMain.handle('ocr:cloud', async (_e, imagePath) => {
+    const jpeg = await sharp(imagePath)
+      .rotate()
+      .resize({ width: 1500, withoutEnlargement: true })
+      .jpeg({ quality: 85 })
+      .toBuffer();
+
+    const gpt = chatgpt.status(app);
+    const openaiKey = db.getSetting('openai_api_key');
+    const doubaoKey = db.getSetting('doubao_api_key');
+    const provider = db.getSetting('cloud_provider', 'auto') || 'auto';
+
+    const lanes = {
+      chatgpt: async () => {
+        if (!gpt.connected || !gpt.sharing) return null;
+        const token = await chatgpt.freshAccessToken(app);
+        const model = await chatgpt.pickModel(token);
+        const text = await chatgpt.respondWithPlan(token, {
+          model,
+          prompt: CLOUD_OCR_PROMPT,
+          imageBase64: jpeg.toString('base64')
+        });
+        const cleaned = text.replace(/```(?:json)?/g, '').trim();
+        return { fields: normalizeCloudFields(JSON.parse(cleaned)), via: 'chatgpt-plan' };
+      },
+      openai: async () => {
+        if (!openaiKey) return null;
+        return callChatCompletions({
+          baseUrl: 'https://api.openai.com/v1',
+          apiKey: openaiKey,
+          model: db.getSetting('openai_model', 'gpt-4o-mini') || 'gpt-4o-mini',
+          imageB64: jpeg.toString('base64'),
+          via: 'api-key'
+        });
+      },
+      doubao: async () => {
+        if (!doubaoKey) return null;
+        return callChatCompletions({
+          baseUrl: db.getSetting('doubao_base_url', 'https://ark.cn-beijing.volces.com/api/v3') || 'https://ark.cn-beijing.volces.com/api/v3',
+          apiKey: doubaoKey,
+          model: db.getSetting('doubao_model', 'doubao-seed-1-6-vision-250815') || 'doubao-seed-1-6-vision-250815',
+          imageB64: jpeg.toString('base64'),
+          via: 'doubao'
+        });
+      }
+    };
+
+    const order = provider === 'auto' ? ['chatgpt', 'openai', 'doubao'] : [provider];
+    const errors = [];
+    for (const lane of order) {
+      try {
+        const result = await lanes[lane]();
+        if (result) return result;
+      } catch (e) {
+        errors.push(`${lane}: ${e.message}`);
+      }
+    }
+    if (!errors.length) return { error: 'No cloud provider configured — connect ChatGPT or add an API key in Settings → Cloud OCR.' };
+    return { error: `Cloud OCR failed — ${errors.join(' · ')}` };
+  });
+}
+
+// Shared OpenAI-compatible chat/completions call (OpenAI + Volcano Engine Ark).
+async function callChatCompletions({ baseUrl, apiKey, model, imageB64, via }) {
+  const res = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model,
+      response_format: { type: 'json_object' },
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: CLOUD_OCR_PROMPT },
+          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${imageB64}` } }
+        ]
+      }]
+    })
+  });
+  if (!res.ok) throw new Error(`${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const json = await res.json();
+  const content = JSON.parse(json.choices[0].message.content.replace(/```(?:json)?/g, '').trim());
+  return { fields: normalizeCloudFields(content), via };
 }
 
 function createWindow() {

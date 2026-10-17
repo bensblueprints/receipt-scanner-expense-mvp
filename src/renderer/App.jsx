@@ -78,7 +78,13 @@ function ReviewForm({ draft, categories, onSaved, onCancel }) {
 
   useEffect(() => {
     if (draft.image_path) window.snap.imageDataUrl(draft.image_path).then(setImgUrl);
-    window.snap.getSetting('openai_api_key').then((v) => setHasCloudKey(!!v));
+    Promise.all([
+      window.snap.getSetting('openai_api_key'),
+      window.snap.getSetting('doubao_api_key'),
+      window.snap.chatgptStatus()
+    ]).then(([openaiKey, doubaoKey, gpt]) =>
+      setHasCloudKey(!!openaiKey || !!doubaoKey || (gpt.connected && gpt.sharing))
+    );
   }, [draft.image_path]);
 
   // OPTIONAL cloud pass: image goes to the user's own OpenAI account, only
@@ -217,7 +223,7 @@ function ReviewForm({ draft, categories, onSaved, onCancel }) {
                 {cloudBusy ? <Loader2 size={14} className="animate-spin" /> : <CloudUpload size={14} />}
                 {cloudBusy ? 'ChatGPT is reading…' : 'Read with ChatGPT (cloud)'}
               </Button>
-              <span className="text-[11px] text-zinc-600">sends this image to your OpenAI account</span>
+              <span className="text-[11px] text-zinc-600">sends this image to your connected cloud provider</span>
             </div>
           )}
           {cloudNote && (
@@ -562,6 +568,15 @@ function MileageView({ bump }) {
 }
 
 /* ---------- settings view ---------- */
+// Small link that opens a provider console in the SYSTEM browser.
+function ConsoleLink({ url, children }) {
+  return (
+    <button onClick={() => window.snap.openExternal(url)} className="text-xs text-emerald-400 underline decoration-emerald-800 underline-offset-2 hover:text-emerald-300">
+      {children}
+    </button>
+  );
+}
+
 function SettingsView({ categories, onCategoriesChanged }) {
   const [watchFolder, setWatchFolder] = useState('');
   const [datePref, setDatePref] = useState('MDY');
@@ -569,13 +584,34 @@ function SettingsView({ categories, onCategoriesChanged }) {
   const [ocrOk, setOcrOk] = useState(true);
   const [apiKey, setApiKey] = useState('');
   const [keySaved, setKeySaved] = useState(false);
+  const [gpt, setGpt] = useState({ connected: false, sharing: false, email: null });
+  const [signingIn, setSigningIn] = useState(false);
+  const [signInError, setSignInError] = useState(null);
+  const [provider, setProvider] = useState('auto');
+  const [doubaoKey, setDoubaoKey] = useState('');
+  const [doubaoModel, setDoubaoModel] = useState('');
+
+  const refreshGpt = () => window.snap.chatgptStatus().then(setGpt);
 
   useEffect(() => {
     window.snap.getSetting('watch_folder').then((v) => setWatchFolder(v || ''));
     window.snap.getSetting('date_pref').then((v) => setDatePref(v || 'MDY'));
     window.snap.ocrAvailable().then(setOcrOk);
     window.snap.getSetting('openai_api_key').then((v) => setApiKey(v || ''));
+    window.snap.getSetting('doubao_api_key').then((v) => setDoubaoKey(v || ''));
+    window.snap.getSetting('doubao_model').then((v) => setDoubaoModel(v || ''));
+    window.snap.getSetting('cloud_provider').then((v) => setProvider(v || 'auto'));
+    refreshGpt();
   }, []);
+
+  const signIn = async () => {
+    setSigningIn(true);
+    setSignInError(null);
+    const res = await window.snap.chatgptSignIn();
+    setSigningIn(false);
+    if (!res.ok) setSignInError(res.error);
+    refreshGpt();
+  };
 
   return (
     <div className="max-w-2xl space-y-5">
@@ -607,21 +643,84 @@ function SettingsView({ categories, onCategoriesChanged }) {
       <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5">
         <h3 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-500">Cloud OCR (optional)</h3>
         <p className="mb-3 text-sm text-zinc-500">
-          Local OCR is the default and never sends anything anywhere. Paste your own OpenAI API key and a
+          Local OCR is the default and never sends anything anywhere. Connect a cloud provider and a
           "Read with ChatGPT" button appears on the review form — useful for handwritten invoices and
-          flagged scans. The image leaves this machine only when you click that button; OpenAI bills your
-          account directly (pennies per scan). The key is stored only in this app's local database.
+          flagged scans. An image leaves this machine only when you click that button.
         </p>
-        <div className="flex gap-2">
-          <input type="password" className={inputCls} value={apiKey} onChange={(e) => { setApiKey(e.target.value); setKeySaved(false); }} placeholder="sk-..." />
-          <Button variant="primary" onClick={async () => { await window.snap.setSetting('openai_api_key', apiKey.trim()); setKeySaved(true); }}>
-            {keySaved ? 'Saved' : 'Save key'}
-          </Button>
-          {apiKey && (
-            <Button variant="danger" onClick={async () => { await window.snap.setSetting('openai_api_key', ''); setApiKey(''); }}>
-              <X size={15} />
-            </Button>
+
+        {/* ChatGPT plan — OAuth, no key needed */}
+        <div className="mb-4 rounded-lg border border-zinc-800/80 bg-zinc-900/60 p-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-zinc-200">ChatGPT account <span className="text-xs text-zinc-500">(uses your Plus/Pro plan)</span></p>
+              {gpt.connected ? (
+                <p className="mt-0.5 text-xs text-emerald-400">
+                  Connected{gpt.email ? ` as ${gpt.email}` : ''} · {gpt.sharing ? 'plan usage enabled' : 'plan usage NOT enabled — re-connect and allow it'}
+                </p>
+              ) : (
+                <p className="mt-0.5 text-xs text-zinc-500">Sign in once — scans are billed to your ChatGPT plan.</p>
+              )}
+            </div>
+            {gpt.connected ? (
+              <Button variant="danger" onClick={async () => { await window.snap.chatgptSignOut(); refreshGpt(); }}>Sign out</Button>
+            ) : (
+              <Button variant="primary" onClick={signIn} disabled={signingIn}>
+                {signingIn ? <Loader2 size={14} className="animate-spin" /> : null} {signingIn ? 'Check your browser…' : 'Continue with ChatGPT'}
+              </Button>
+            )}
+          </div>
+          {signInError && <p className="mt-2 text-xs text-amber-400">{signInError}</p>}
+          {gpt.connected && (
+            <p className="mt-2"><ConsoleLink url="https://chatgpt.com/settings">Manage plan usage in ChatGPT settings</ConsoleLink></p>
           )}
+        </div>
+
+        {/* provider picker */}
+        <Field label="Cloud provider">
+          <select className={`${inputCls} !w-72`} value={provider} onChange={async (e) => { setProvider(e.target.value); await window.snap.setSetting('cloud_provider', e.target.value); }}>
+            <option value="auto">Auto — try connected providers in order</option>
+            <option value="chatgpt">ChatGPT plan</option>
+            <option value="openai">OpenAI API key</option>
+            <option value="doubao">Doubao (ByteDance) API key</option>
+          </select>
+        </Field>
+
+        {/* OpenAI API key */}
+        <div className="mt-3">
+          <div className="mb-1 flex items-center gap-2">
+            <span className="text-xs font-medium uppercase tracking-wider text-zinc-500">OpenAI API key</span>
+            <ConsoleLink url="https://platform.openai.com/api-keys">Get a key at platform.openai.com</ConsoleLink>
+          </div>
+          <div className="flex gap-2">
+            <input type="password" className={inputCls} value={apiKey} onChange={(e) => { setApiKey(e.target.value); setKeySaved(false); }} placeholder="sk-..." />
+            <Button variant="primary" onClick={async () => { await window.snap.setSetting('openai_api_key', apiKey.trim()); setKeySaved(true); }}>
+              {keySaved ? 'Saved' : 'Save key'}
+            </Button>
+            {apiKey && (
+              <Button variant="danger" onClick={async () => { await window.snap.setSetting('openai_api_key', ''); setApiKey(''); }}>
+                <X size={15} />
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {/* Doubao */}
+        <div className="mt-3">
+          <div className="mb-1 flex items-center gap-2">
+            <span className="text-xs font-medium uppercase tracking-wider text-zinc-500">Doubao (ByteDance) vision</span>
+            <ConsoleLink url="https://console.volcengine.com/ark">Volcano Engine Ark console</ConsoleLink>
+            <ConsoleLink url="https://www.byteplus.com/product/modelark">BytePlus (international)</ConsoleLink>
+          </div>
+          <div className="flex gap-2">
+            <input type="password" className={inputCls} value={doubaoKey} onChange={(e) => setDoubaoKey(e.target.value)} placeholder="Ark API key or endpoint key" />
+            <input className={`${inputCls} !w-64`} value={doubaoModel} onChange={async (e) => { setDoubaoModel(e.target.value); await window.snap.setSetting('doubao_model', e.target.value.trim()); }} placeholder="model / endpoint id (default: doubao-seed-1-6-vision)" />
+            <Button variant="primary" onClick={async () => { await window.snap.setSetting('doubao_api_key', doubaoKey.trim()); }}>Save</Button>
+            {doubaoKey && (
+              <Button variant="danger" onClick={async () => { await window.snap.setSetting('doubao_api_key', ''); setDoubaoKey(''); }}>
+                <X size={15} />
+              </Button>
+            )}
+          </div>
         </div>
       </div>
       <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5">
@@ -634,7 +733,7 @@ function SettingsView({ categories, onCategoriesChanged }) {
           <Button variant="primary" onClick={async () => { if (newCat.trim()) { await window.snap.addCategory(newCat); setNewCat(''); onCategoriesChanged(); } }}><Plus size={15} /></Button>
         </div>
       </div>
-      <p className="text-xs text-zinc-600">Snapreceipt is 100% local by default: OCR never leaves this machine and extraction only prefills forms — you review before anything is saved. The optional Cloud OCR above is off until you add a key, and sends an image only when you click its button.</p>
+      <p className="text-xs text-zinc-600">Snapreceipt is 100% local by default: OCR never leaves this machine and extraction only prefills forms — you review before anything is saved. Cloud providers above are off until you connect one, and an image is sent only when you click its button on a scan.</p>
     </div>
   );
 }
