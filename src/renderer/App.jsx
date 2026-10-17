@@ -291,6 +291,10 @@ function ReceiptsView({ categories, refreshKey, bump }) {
         <p className="text-sm text-zinc-400">
           {busy ? 'Running local OCR…' : 'Drop receipt images here — OCR runs 100% on this machine'}
         </p>
+        <p className="max-w-md text-center text-xs text-zinc-500">
+          Use a sharp, high-resolution photo: fill the frame with the receipt, good light, no blur.
+          Low-resolution or tiny images misread digits (6.11 can become 6.41) — the review step will flag math that doesn't add up.
+        </p>
         <div className="flex gap-2">
           <Button onClick={async () => importFiles(await window.snap.pickImages())} disabled={busy}>
             <Upload size={15} /> Choose files
