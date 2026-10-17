@@ -90,6 +90,19 @@ function ReviewForm({ draft, categories, onSaved, onCancel }) {
     setItems((arr) => arr.map((it, j) => (j === i ? { ...it, [key]: val } : it)));
   const itemsSumCents = items.reduce((s, it) => s + (centsFromInput(it.amount) ?? 0), 0);
 
+  // OCR cross-checks — digit misreads (6.11 vs 6.41) break these identities,
+  // so warn live while the user reviews. Warnings never block saving.
+  const totalC = centsFromInput(total);
+  const taxC = centsFromInput(tax);
+  const subtotalC = centsFromInput(subtotal);
+  const warnings = [];
+  if (totalC != null && subtotalC != null && taxC != null && subtotalC + taxC !== totalC) {
+    warnings.push(`Subtotal + tax = ${fmt(subtotalC + taxC)}, but total is ${fmt(totalC)} — one of them is likely misread.`);
+  }
+  if (items.length > 0 && subtotalC != null && itemsSumCents > 0 && itemsSumCents !== subtotalC) {
+    warnings.push(`Line items add up to ${fmt(itemsSumCents)}, not the ${fmt(subtotalC)} subtotal — check the amounts.`);
+  }
+
   const save = async () => {
     setSaving(true);
     const payload = {
@@ -152,6 +165,11 @@ function ReviewForm({ draft, categories, onSaved, onCancel }) {
               OCR prefilled these fields — nothing is saved until you hit Save. Fix anything it got wrong.
             </p>
           )}
+          {warnings.map((w) => (
+            <p key={w} className="flex items-start gap-2 rounded-lg border border-amber-900/50 bg-amber-950/40 px-3 py-2 text-xs text-amber-300">
+              <AlertTriangle size={14} className="mt-0.5 shrink-0" /> {w}
+            </p>
+          ))}
           <Field label="Vendor"><input className={inputCls} value={vendor} onChange={(e) => setVendor(e.target.value)} placeholder="Coffee House" /></Field>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Date"><input type="date" className={inputCls} value={date || ''} onChange={(e) => setDate(e.target.value)} /></Field>
